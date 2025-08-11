@@ -1,5 +1,6 @@
 import os
 import streamlit as st
+import asyncio
 from typing import List
 
 from llama_index.llms.groq import Groq
@@ -103,6 +104,21 @@ def build_agent(groq_key: str, model_name: str, temperature: float, chunk_size: 
     )
     return agent
 
+def run_agent_async(agent, query, max_iterations=30):
+    """Helper to run async agent in sync Streamlit context"""
+    async def _run():
+        return await agent.run(query, max_iterations=max_iterations)
+    
+    try:
+        return asyncio.run(_run())
+    except RuntimeError:
+        # For environments that already have a loop
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
 if init_clicked:
     try:
         if not os.path.exists(support_pdf):
@@ -118,29 +134,34 @@ examples = [
     "What is the delivery date for order number 1002?",
     "Provide customer support contact info.",
 ]
-query = st.text_input("Your question", value=examples)
+
+# Persist the query across reruns
+if "query" not in st.session_state:
+    st.session_state["query"] = examples[0]
+
+query = st.text_input("Your question", value=st.session_state["query"])
 
 ex_cols = st.columns(len(examples))
 for i, ex in enumerate(examples):
     if ex_cols[i].button(ex):
-        query = ex
-        st.experimental_rerun()
+        st.session_state["query"] = ex
+        if hasattr(st, "rerun"):
+            st.rerun()
 
 if st.button("Run"):
     if "agent" not in st.session_state:
         st.error("Agent is not initialized. Click Initialize Agent in the sidebar.")
-    elif not query.strip():
-        st.warning("Please enter a question.")
     else:
-        with st.spinner("Agent thinking..."):
-            try:
-                handler = st.session_state.agent.run(query)
-                for _ in handler.stream_events():
-                    pass
-                answer = handler.result()
-                st.success("Done")
-                st.markdown("Answer:")
-                st.write(str(answer))
-            except Exception as e:
-                st.error(f"Query failed: {e}")
-                st.info("If iteration-limit errors occur, retry with a more specific question or reduce temperature.")
+        query = st.session_state["query"].strip()
+        if not query:
+            st.warning("Please enter a question.")
+        else:
+            with st.spinner("Agent thinking..."):
+                try:
+                    answer = run_agent_async(st.session_state.agent, query, max_iterations=30)
+                    st.success("Done")
+                    st.markdown("Answer:")
+                    st.write(str(answer))
+                except Exception as e:
+                    st.error(f"Query failed: {e}")
+                    st.info("If iteration-limit errors occur, try a more specific question or reduce temperature.")
